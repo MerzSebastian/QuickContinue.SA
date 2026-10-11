@@ -16,13 +16,12 @@ If there is no save game, the menu is left alone.
 
 ## What it looks like
 
-**The main menu with Continue on top**
+**Continue in the main menu, and Load latest save in the pause menu**
 
-![The main menu with the Continue button](docs/media/menu-continue.gif)
+![Continue in the main menu and Load latest save in the pause menu](docs/media/menu-continue.gif)
 
-**With `AutoLoad=1`: straight from the start into the game**
-
-![AutoLoad: from the start straight into the game](docs/media/autoload.gif)
+The second thing the plugin is made for is **AutoLoad**: it skips the main menu on the first start and goes straight into your
+newest save. Switch it on under *Options > Quick start* in the game, or with `AutoLoad=1` in the ini.
 
 ## Requirements
 
