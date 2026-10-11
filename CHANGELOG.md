@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- Fix: "Load latest save" and Continue are in the menu from its very first frame. Before, the pause menu showed without the
+  entry the first time it was opened, and the entry appeared one frame later.
+
 ## 1.1.0
 
 - **Pause menu:** "Load latest save" below Resume, with the game's confirmation question. Hide it with

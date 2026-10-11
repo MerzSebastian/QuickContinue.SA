@@ -150,6 +150,7 @@ constexpr int8_t SCREEN_LOAD_GAME_ASK   = 11; // "All unsaved progress in your c
 constexpr int8_t SCREEN_LOAD_FIRST_SAVE = 13;
 constexpr int8_t SCREEN_MAIN_MENU       = 34;
 constexpr int8_t SCREEN_PAUSE_MENU      = 41;
+constexpr int8_t SCREEN_OPENING         = 42; // placeholder while the menu opens; DrawFrontEnd turns it into the main or pause menu
 constexpr int8_t SCREEN_DISPLAY         = 4;
 constexpr int8_t SCREEN_OPTIONS         = 33;
 constexpr int8_t SCREEN_GAME_LOADED     = 21; // "game loaded - OK" page of the consoles; nothing on PC reaches it, so it is borrowed

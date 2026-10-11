@@ -25,7 +25,7 @@
 
 using namespace game;
 
-constexpr const char* kVersion = "1.1.0";
+constexpr const char* kVersion = "1.1.1";
 
 // ---------------------------------------------------------------------------
 // Log (QuickContinue.SA.log in "Documents\GTA San Andreas User Files")
@@ -349,7 +349,9 @@ static bool InsertLoadLatestEntry(MenuScreen& s) {
 
 // Runs while the game is in a session (not in the main menu).
 static void PauseMenuTick(MenuManager& m) {
-    const bool onPause = m.m_nCurrentScreen == SCREEN_PAUSE_MENU;
+    // When the menu opens, the screen is still the placeholder 42 and DrawFrontEnd turns it into the pause menu at its
+    // start (see 0x57C2DD), so the first frame has to count as the pause menu already.
+    const bool onPause = m.m_nCurrentScreen == SCREEN_PAUSE_MENU || m.m_nCurrentScreen == SCREEN_OPENING;
     if (onPause && g_prevPauseScreen != SCREEN_PAUSE_MENU) {
         // The pause menu was just opened: the newest save can have changed since (the player saved).
         g_pauseSlot = FindNewestSlot();
@@ -360,7 +362,7 @@ static void PauseMenuTick(MenuManager& m) {
         }
     }
     if (onPause && g_pauseInserted && g_pauseSlot >= 0) m.m_SelectedSlot = static_cast<uint8_t>(g_pauseSlot);
-    g_prevPauseScreen = m.m_nCurrentScreen;
+    g_prevPauseScreen = onPause ? SCREEN_PAUSE_MENU : m.m_nCurrentScreen;
 }
 
 // ---------------------------------------------------------------------------
@@ -685,8 +687,20 @@ static void RunTick() {
         g_initDone = true; g_menuPatched = false; // never retry after a fault
     }
 }
-static void __fastcall MenuHook0(void* self, void* /*edx*/) { g_menuOrig[0](self); RunTick(); }
-static void __fastcall MenuHook1(void* self, void* /*edx*/) { g_menuOrig[1](self); RunTick(); }
+// Before the menu is drawn: the entries must be in the tables for the very first frame of a menu, otherwise they would
+// pop in one frame after the rest (visible when the pause menu is opened for the first time).
+static void RunPre() {
+    __try {
+        MenuManager& m = Menu();
+        if (g_settingsMenu && !g_settingsTried) SetupSettingsMenu();
+        if (!m.m_bMainMenuSwitch) { if (g_pauseLoadLatest) PauseMenuTick(m); }
+        else if (!g_initDone) FirstMenuFrame();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_initDone = true; g_menuPatched = false;
+    }
+}
+static void __fastcall MenuHook0(void* self, void* /*edx*/) { RunPre(); g_menuOrig[0](self); RunTick(); }
+static void __fastcall MenuHook1(void* self, void* /*edx*/) { RunPre(); g_menuOrig[1](self); RunTick(); }
 
 static bool Install() {
     const uint32_t probe = *reinterpret_cast<uint32_t*>(ADDR_VersionProbe);
