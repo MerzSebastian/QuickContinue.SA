@@ -12,7 +12,7 @@ del "%VSTMP%" 2>nul
 if not defined VSDIR (echo Visual Studio with the C++ x86 toolset not found & exit /b 1)
 call "%VSDIR%\VC\Auxiliary\Build\vcvars32.bat" >nul || exit /b 1
 if not exist out mkdir out
-cl /nologo /LD /MT /O2 /W4 /EHsc /std:c++17 src\main.cpp /Fo:out\ /Fe:out\QuickContinue.SA.asi /link /MACHINE:X86 user32.lib shell32.lib || exit /b 1
+cl /nologo /LD /MT /O2 /W4 /EHsc /std:c++17 /utf-8 src\main.cpp /Fo:out\ /Fe:out\QuickContinue.SA.asi /link /MACHINE:X86 user32.lib shell32.lib || exit /b 1
 copy /y data\QuickContinue.SA.ini out\QuickContinue.SA.ini >nul
 echo.
 echo Built out\QuickContinue.SA.asi

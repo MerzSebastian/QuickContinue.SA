@@ -146,8 +146,20 @@ static_assert(sizeof(MenuScreen) == 0xE2, "menu screen must be 0xE2 bytes");
 
 // eMenuScreen values
 constexpr int8_t SCREEN_START_GAME      = 1;
+constexpr int8_t SCREEN_LOAD_GAME_ASK   = 11; // "All unsaved progress in your current game will be lost. Proceed with loading?"
 constexpr int8_t SCREEN_LOAD_FIRST_SAVE = 13;
 constexpr int8_t SCREEN_MAIN_MENU       = 34;
+constexpr int8_t SCREEN_PAUSE_MENU      = 41;
+constexpr int8_t SCREEN_DISPLAY         = 4;
+constexpr int8_t SCREEN_OPTIONS         = 33;
+constexpr int8_t SCREEN_GAME_LOADED     = 21; // "game loaded - OK" page of the consoles; nothing on PC reaches it, so it is borrowed
+
+// Menu actions and entry types
+constexpr uint8_t ACTION_LABEL = 1, ACTION_CHANGEMENU = 5, ACTION_SKIP = 20;
+// MENUACTION_CHANGE_LANG: the game prints the language name (CText::Get "FEL_xxx") in the value column of such a row.
+// The plugin answers that request with the value of its setting; the Enter / left / right input is handled before the game.
+constexpr uint8_t ACTION_QC_SETTING = 36;
+constexpr uint8_t TYPE_BUTTON = 11, TYPE_OPTION = 12;
 
 constexpr int MAX_SAVEGAME_SLOTS = 8;
 
@@ -165,7 +177,9 @@ constexpr uintptr_t ADDR_MenuCodeBegin       = 0x572EC0; // CMenuManager code ra
 constexpr uintptr_t ADDR_MenuCodeEnd         = 0x580000;
 constexpr uintptr_t ADDR_MenuDraw            = 0x57C290; // CMenuManager::DrawFrontEnd
 constexpr uintptr_t ADDR_MenuDrawCalls[]     = { 0x53E82D, 0x53EB8C }; // its two call sites (before / during game session)
-constexpr uintptr_t ADDR_VersionProbe        = 0x401000; // GAME_10US_COMPACT: 0x53EC8B55, HOODLUM: 0x16197BE9
+constexpr uintptr_t ADDR_MenuValueTextCall   = 0x57A161; // DrawStandardMenu: CText::Get for the value column of a language row
+constexpr uintptr_t ADDR_PcOptionsCall       = 0x576FEF; // call to CMenuManager::ProcessPCMenuOptions inside ProcessMenuOptions
+constexpr uintptr_t ADDR_VersionProbe       = 0x401000; // GAME_10US_COMPACT: 0x53EC8B55, HOODLUM: 0x16197BE9
 
 inline MenuManager& Menu()            { return *reinterpret_cast<MenuManager*>(ADDR_FrontEndMenuManager); }
 inline MenuScreen&  Screen(int idx)   { return reinterpret_cast<MenuScreen*>(ADDR_aScreens)[idx]; }

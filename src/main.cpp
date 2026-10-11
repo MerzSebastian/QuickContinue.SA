@@ -34,7 +34,7 @@ static char g_logPath[MAX_PATH];
 static bool g_debug = false; // Debug=1 in the ini: verbose log (state changes, patch details)
 
 static void Log(const char* fmt, ...) {
-    if (!g_logPath[0]) return;
+    if (!g_debug || !g_logPath[0]) return;   // no log unless Debug=1
     FILE* f = nullptr;
     if (fopen_s(&f, g_logPath, "a") != 0 || !f) return;
     va_list ap; va_start(ap, fmt);
@@ -55,6 +55,18 @@ static int  g_skipKey        = VK_CONTROL;
 static bool g_skipIntro      = true;
 static bool g_skipTitleFade  = true;
 static bool g_smoothLoad     = true;
+static bool g_pauseLoadLatest = true;   // "Load latest save" entry in the pause menu
+static bool g_pauseConfirm   = true;    // ask "all unsaved progress will be lost" before loading from the pause menu
+static bool g_settingsMenu   = true;    // "QuickContinue" page in Options; its values are kept in QuickContinue.SA.cfg
+static char g_cfgPath[MAX_PATH] = "";
+static char g_iniPath[MAX_PATH] = "";
+// [Text] in the ini: own wording for the two entries (any language); empty = the built-in text of the game language
+static char g_language[8]        = "";   // Language= in the ini: en, de, fr, it, es, pt, nl, ... (empty = game language)
+static char g_textContinue[48]   = "";
+static char g_textLoadLatest[48] = "";
+
+static void LoadSavedSettings();
+static void LoadPageTextOverrides(const char* ini);
 
 static void LoadSettings(HMODULE self) {
     char path[MAX_PATH];
@@ -65,10 +77,11 @@ static void LoadSettings(HMODULE self) {
     char docs[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, docs))) {
         _snprintf_s(g_logPath, MAX_PATH, _TRUNCATE, "%s\\GTA San Andreas User Files\\QuickContinue.SA.log", docs);
-        remove(g_logPath);
     }
     strcpy_s(dot, path + MAX_PATH - dot, ".ini");
+    strcpy_s(g_iniPath, path);
     g_debug          = GetPrivateProfileIntA("QuickContinue", "Debug", 0, path) != 0;
+    if (g_debug && g_logPath[0]) remove(g_logPath);   // a fresh log per start
     Log("QuickContinue.SA %s loaded from %s", kVersion, path);
     g_continueButton = GetPrivateProfileIntA("QuickContinue", "ContinueButton", 1, path) != 0;
     g_autoLoad       = GetPrivateProfileIntA("QuickContinue", "AutoLoad", 0, path) != 0;
@@ -76,6 +89,14 @@ static void LoadSettings(HMODULE self) {
     g_skipIntro      = GetPrivateProfileIntA("QuickContinue", "SkipIntro", 1, path) != 0;
     g_skipTitleFade  = GetPrivateProfileIntA("QuickContinue", "SkipTitleFade", 1, path) != 0;
     g_smoothLoad     = GetPrivateProfileIntA("QuickContinue", "SmoothLoadScreen", 1, path) != 0;
+    g_pauseLoadLatest = GetPrivateProfileIntA("QuickContinue", "PauseMenuLoadLatest", 1, path) != 0;
+    g_pauseConfirm   = GetPrivateProfileIntA("QuickContinue", "PauseMenuConfirm", 1, path) != 0;
+    g_settingsMenu   = GetPrivateProfileIntA("QuickContinue", "SettingsMenu", 1, path) != 0;
+    GetPrivateProfileStringA("QuickContinue", "Language", "", g_language, sizeof(g_language), path);
+    GetPrivateProfileStringA("Text", "Continue", "", g_textContinue, sizeof(g_textContinue), path);
+    GetPrivateProfileStringA("Text", "LoadLatest", "", g_textLoadLatest, sizeof(g_textLoadLatest), path);
+    LoadSavedSettings();
+    LoadPageTextOverrides(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -103,26 +124,96 @@ static int FindNewestSlot() {
 // ---------------------------------------------------------------------------
 // Label for the new menu entry (the game's GXT has no "Continue" key)
 // ---------------------------------------------------------------------------
-static const char KEY_CONTINUE[] = "QC_CONT";
-static char       g_label[32]    = "Continue";
+static const char KEY_CONTINUE[]  = "QC_CONT";   // main menu: Continue
+static const char KEY_LOADLATEST[] = "QC_LOAD";   // pause menu: Load latest save
+static char       g_label[48]     = "Continue";
 
-static const char* LabelForLanguage(uint8_t lang) {
-    switch (lang) {
-    case GXT_LANG_FRENCH:  return "Continuer";
-    case GXT_LANG_GERMAN:  return "Fortsetzen";
-    case GXT_LANG_ITALIAN: return "Continua";
-    case GXT_LANG_SPANISH: return "Continuar";
-    default:           return "Continue";
+struct Lang { const char* code; const char* cont; const char* load; };
+
+// Texts are UTF-8 here and converted to the game's own character codes (Gxt below). The game font has the letters of
+// its five languages (ÀÁÂÄÆÇÈÉÊËÌÍÎÏÒÓÔÖÙÚÛÜßàáâäæçèéêëìíîïòóôöùúûüñÑ¿¡); languages with other letters are written without them.
+static const Lang kLangs[] = {
+    { "en", "Continue",   "Load latest save" },
+    { "de", "Fortsetzen", "Letzten Spielstand laden" },
+    { "fr", "Continuer",  "Charger la dernière partie" },
+    { "it", "Continua",   "Carica ultimo salvataggio" },
+    { "es", "Continuar",  "Cargar última partida" },
+    { "pt", "Continuar",  "Carregar último jogo" },
+    { "nl", "Doorgaan",   "Laatste spel laden" },
+    { "sv", "Fortsätt",   "Ladda senaste sparning" },
+    { "fi", "Jatka",      "Lataa viimeisin tallennus" },
+    { "hu", "Folytatás",  "Utolsó mentés betöltése" },
+};
+
+static const Lang* FindLang(const char* code) {
+    for (const Lang& l : kLangs) if (_stricmp(l.code, code) == 0) return &l;
+    return nullptr;
+}
+
+// The language: the ini key Language (any code of kLangs) or, if empty / unknown, the language slot of the game.
+static const Lang& CurrentLang() {
+    if (g_language[0]) { if (const Lang* l = FindLang(g_language)) return *l; }
+    switch (Menu().m_nPrefsLanguage) {
+    case GXT_LANG_FRENCH:  return *FindLang("fr");
+    case GXT_LANG_GERMAN:  return *FindLang("de");
+    case GXT_LANG_ITALIAN: return *FindLang("it");
+    case GXT_LANG_SPANISH: return *FindLang("es");
+    default:               return *FindLang("en");
     }
+}
+
+// UTF-8 -> the character codes of the game font. Letters the font does not have become their plain ASCII base.
+static const char* Gxt(const char* utf8) {
+    static const char kFont[] = "ÀÁÂÄÆÇÈÉÊËÌÍÎÏÒÓÔÖÙÚÛÜßàáâäæçèéêëìíîïòóôöùúûüñÑ¿¡";   // codes 0x80...
+    static char ring[8][96];
+    static int  next = 0;
+    char* out = ring[next++ & 7];
+    int n = 0;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(utf8); *p && n < 94; ) {
+        if (*p < 0x80) { out[n++] = static_cast<char>(*p++); continue; }
+        const int len = (*p >= 0xF0) ? 4 : (*p >= 0xE0) ? 3 : 2;
+        // look the character up in kFont (itself UTF-8, two bytes per letter)
+        int code = -1;
+        if (len == 2) {
+            for (int i = 0, c = 0x80; kFont[i]; i += 2, c++)
+                if (static_cast<unsigned char>(kFont[i]) == p[0] && static_cast<unsigned char>(kFont[i + 1]) == p[1]) { code = c; break; }
+        }
+        out[n++] = code >= 0 ? static_cast<char>(code) : '?';
+        p += len;
+    }
+    out[n] = 0;
+    return out;
 }
 
 using TextGetFn = const char*(__thiscall*)(void* self, const char* key);
 static TextGetFn g_textGetOrig = nullptr;
 
+static const char* SettingsText(void* self, const char* key);   // texts of the settings page, defined below
+static const char* SettingsValueText(void* self);
+static int g_rowPending = -1;   // settings page: row whose name was just requested, the next text request is its value
+
+// The value column of the settings rows. Another plugin (a language loader) may have redirected this call, so it
+// is hooked on its own, with whatever target it has, and chained to.
+static TextGetFn g_valueGetOrig = nullptr;
+static const char* __fastcall ValueGetHook(void* self, void* /*edx*/, const char* key) {
+    if (g_rowPending >= 0) return SettingsValueText(self);
+    return g_valueGetOrig(self, key);
+}
+
 static const char* __fastcall TextGetHook(void* self, void* /*edx*/, const char* key) {
-    if (key && key[0] == 'Q' && strcmp(key, KEY_CONTINUE) == 0) {
-        strcpy_s(g_label, LabelForLanguage(Menu().m_nPrefsLanguage));
-        return g_label; // GxtChar is plain ASCII for these characters
+    if (key && key[0] == 'Q' && key[1] == 'C' && key[2] == '_') {
+        // GxtChar is plain ASCII for these characters
+        if (strcmp(key, KEY_CONTINUE) == 0) {
+            strcpy_s(g_label, g_textContinue[0] ? g_textContinue : Gxt(CurrentLang().cont));
+            return g_label;
+        }
+        if (strcmp(key, KEY_LOADLATEST) == 0) {
+            strcpy_s(g_label, g_textLoadLatest[0] ? g_textLoadLatest : Gxt(CurrentLang().load));
+            return g_label;
+        }
+        if (const char* t = SettingsText(self, key)) return t;
+    } else if (g_rowPending >= 0 && key && key[0] == 'F' && key[1] == 'E' && key[2] == 'L' && key[3] == '_') {
+        return SettingsValueText(self);
     }
     return g_textGetOrig(self, key);
 }
@@ -158,6 +249,13 @@ static int HookMenuTextCalls() {
         count++;
     }
     if (count) g_textGetOrig = reinterpret_cast<TextGetFn>(ADDR_CText_Get);
+    const uintptr_t valueTarget = CheckCallSite(ADDR_MenuValueTextCall, 0);
+    if (valueTarget && valueTarget != reinterpret_cast<uintptr_t>(&TextGetHook)) {
+        g_valueGetOrig = reinterpret_cast<TextGetFn>(valueTarget);
+        PatchRel(ADDR_MenuValueTextCall, static_cast<int32_t>(reinterpret_cast<uintptr_t>(&ValueGetHook) - (ADDR_MenuValueTextCall + 5)));
+        LOG_DEBUG("value text call %08X: target %08X%s", (unsigned)ADDR_MenuValueTextCall, (unsigned)valueTarget,
+                  valueTarget == ADDR_CText_Get ? "" : " (redirected by another plugin)");
+    }
     return count;
 }
 
@@ -209,6 +307,283 @@ static MenuScreen* ResolveScreenTable() {
     return reinterpret_cast<MenuScreen*>(a == b ? a : ADDR_aScreens);
 }
 
+// Both entries need the text hook and the table; set them up once, whichever is needed first.
+static bool g_textHooked = false;
+static bool EnsureTextHook() {
+    if (!g_textHooked) g_textHooked = HookMenuTextCalls() > 0;
+    return g_textHooked;
+}
+static MenuScreen* EnsureTable() {
+    if (!g_table) g_table = ResolveScreenTable();
+    return g_table;
+}
+
+// ---------------------------------------------------------------------------
+// Pause menu: insert "Load latest save" right below "Resume"
+// ---------------------------------------------------------------------------
+static bool g_pauseInserted = false;
+static int  g_pauseSlot     = -1;
+static int8_t g_prevPauseScreen = -1;
+
+static bool InsertLoadLatestEntry(MenuScreen& s) {
+    MenuItem* it = s.m_aItems;
+
+    // Expect exactly: Resume, Save/Load game, Map, Stats, Brief, Options, Quit Game, <empty>.
+    if (strcmp(s.m_szTitleName, "FET_PAU") != 0 || strcmp(it[0].m_szName, "FEP_RES") != 0 ||
+        strcmp(it[1].m_szName, "FEH_SGA") != 0 || strcmp(it[6].m_szName, "FEP_QUI") != 0 || it[7].m_szName[0] != 0)
+        return false;
+
+    MenuItem entry = it[1];                      // same type and alignment; X=Y=0 = "below the previous item"
+    strcpy_s(entry.m_szName, KEY_LOADLATEST);
+    // With the confirmation the game asks "all unsaved progress will be lost" first; its "Yes" starts the load.
+    entry.m_nTargetMenu = g_pauseConfirm ? SCREEN_LOAD_GAME_ASK : SCREEN_LOAD_FIRST_SAVE;
+
+    for (int i = 7; i >= 2; --i) it[i] = it[i - 1];
+    it[1] = entry;
+    // The game lays out items with X=Y=0 under their predecessor on the first draw and writes the result back, so
+    // after the pause menu was drawn once the items have positions. Reset everything below "Resume" (the anchor)
+    // so that it is laid out again with the new entry; otherwise two entries would sit on the same spot.
+    for (int i = 1; i <= 7; ++i) it[i].m_X = it[i].m_Y = 0;
+    return true;
+}
+
+// Runs while the game is in a session (not in the main menu).
+static void PauseMenuTick(MenuManager& m) {
+    const bool onPause = m.m_nCurrentScreen == SCREEN_PAUSE_MENU;
+    if (onPause && g_prevPauseScreen != SCREEN_PAUSE_MENU) {
+        // The pause menu was just opened: the newest save can have changed since (the player saved).
+        g_pauseSlot = FindNewestSlot();
+        if (g_pauseSlot >= 0 && !g_pauseInserted) {
+            g_pauseInserted = EnsureTextHook() && InsertLoadLatestEntry(EnsureTable()[SCREEN_PAUSE_MENU]);
+            Log("pause menu entry inserted: %d (newest slot %d)", g_pauseInserted, g_pauseSlot);
+            if (!g_pauseInserted) g_pauseLoadLatest = false;   // the table is not what we expect: never retry
+        }
+    }
+    if (onPause && g_pauseInserted && g_pauseSlot >= 0) m.m_SelectedSlot = static_cast<uint8_t>(g_pauseSlot);
+    g_prevPauseScreen = m.m_nCurrentScreen;
+}
+
+// ---------------------------------------------------------------------------
+// Settings page: Options > QuickContinue
+// ---------------------------------------------------------------------------
+// The ini holds the defaults. Changes made on the page are written to QuickContinue.SA.cfg next to the save games and
+// win over the ini (read at startup). With SettingsMenu=0 there is no page and the cfg is neither read nor written.
+// Only the settings that players switch in daily use are on the page; the others (SkipIntro, SkipTitleFade,
+// SmoothLoadScreen, SkipKey, Language, [Text], Debug) stay in the ini and are not touched by the cfg.
+// Every setting is read once at startup, so a change applies from the next start of the game.
+struct Setting { const char* key; bool* value; bool def; };   // def: used if the ini has no such key
+static const Setting kSettings[] = {
+    { "ContinueButton",      &g_continueButton, true },
+    { "AutoLoad",            &g_autoLoad, false },
+    { "PauseMenuLoadLatest", &g_pauseLoadLatest, true },
+    { "PauseMenuConfirm",    &g_pauseConfirm, true },
+};
+constexpr int kSettingCount = sizeof(kSettings) / sizeof(kSettings[0]);
+
+// Texts of the page, per language (UTF-8, converted by Gxt). Languages that have no entry here show English.
+// Only letters of the game font are used.
+struct PageText {
+    const char* code;
+    const char* page;                    // name of the page; the entry in the Options list shows it in capitals
+    const char* names[kSettingCount];    // ContinueButton, AutoLoad, PauseMenuLoadLatest, PauseMenuConfirm
+    const char* note;
+    const char* reset;
+};
+static const PageText kPageTexts[] = {
+    { "en", "Quick start", { "Continue button", "Load save on start", "Pause: load latest save", "Pause: ask first" },
+      "Changes apply after restarting the game", "Reset to defaults" },
+    { "de", "Schnellstart", { "Fortsetzen-Knopf", "Beim Start laden", "Pause: Letzten Stand laden", "Pause: vorher fragen" },
+      "Änderungen gelten nach einem Neustart", "Auf Standard zurücksetzen" },
+    { "fr", "Démarrage rapide", { "Bouton Continuer", "Charger au démarrage", "Pause : dernière partie", "Pause : demander" },
+      "Valable après redémarrage", "Valeurs par défaut" },
+    { "it", "Avvio rapido", { "Pulsante Continua", "Carica all'avvio", "Pausa: ultimo salvataggio", "Pausa: chiedi prima" },
+      "Valido dopo il riavvio", "Ripristina predefiniti" },
+    { "es", "Inicio rápido", { "Botón Continuar", "Cargar al iniciar", "Pausa: última partida", "Pausa: preguntar" },
+      "Se aplica al reiniciar", "Restablecer valores" },
+    { "pt", "Início rápido", { "Continuar no menu", "Carregar ao iniciar", "Pausa: carregar último", "Pausa: perguntar antes" },
+      "Muda ao reiniciar o jogo", "Valores predefinidos" },
+    { "nl", "Snelstart", { "Doorgaan-knop", "Laden bij start", "Pauze: laatste spel laden", "Pauze: eerst vragen" },
+      "Wijzigingen gelden na herstart", "Standaardwaarden" },
+    { "sv", "Snabbstart", { "Fortsätt-knapp", "Ladda vid start", "Paus: ladda senaste", "Paus: bekräfta först" },
+      "Ändringar gäller efter omstart", "Standardvärden" },
+    { "fi", "Pikakäynnistys", { "Jatka-painike", "Lataa käynnistyksessä", "Tauko: lataa viimeisin", "Tauko: kysy ensin" },
+      "Voimassa uudelleenkäynnistyksen jälkeen", "Oletusarvot" },
+    { "hu", "Gyorsindítás", { "Folytatás gomb", "Betöltés induláskor", "Szünet: utolsó betöltése", "Szünet: rákérdezés" },
+      "Újraindítás után érvényes", "Alapértékek" },
+};
+
+static const PageText& PageTexts() {
+    const char* c = CurrentLang().code;
+    for (const PageText& t : kPageTexts) if (strcmp(t.code, c) == 0) return t;
+    return kPageTexts[0];
+}
+
+// [Text] in the ini: own wording for the page (any language); empty = the built-in text of the language.
+static char g_textPage[48], g_textNames[kSettingCount][48], g_textNote[96], g_textReset[48];
+
+static void LoadPageTextOverrides(const char* ini) {
+    GetPrivateProfileStringA("Text", "PageName", "", g_textPage, sizeof(g_textPage), ini);
+    static const char* const keys[kSettingCount] = { "ContinueButton", "AutoLoad", "PauseLoadLatest", "PauseAskFirst" };
+    for (int i = 0; i < kSettingCount; i++)
+        GetPrivateProfileStringA("Text", keys[i], "", g_textNames[i], sizeof(g_textNames[i]), ini);
+    GetPrivateProfileStringA("Text", "RestartNote", "", g_textNote, sizeof(g_textNote), ini);
+    GetPrivateProfileStringA("Text", "ResetButton", "", g_textReset, sizeof(g_textReset), ini);
+}
+
+// Capitals for the Options list: ASCII letters and the accented letters of the game font (codes 0x97-0xAD).
+static void UpperGxt(char* t) {
+    for (unsigned char* p = reinterpret_cast<unsigned char*>(t); *p; p++) {
+        if (*p >= 'a' && *p <= 'z') *p -= 32;
+        else if (*p >= 0x97 && *p <= 0xAC) *p -= 0x17;
+        else if (*p == 0xAD) *p = 0xAE;
+    }
+}
+static void UpperAscii(char* t) { for (; *t; t++) if (*t >= 'a' && *t <= 'z') *t -= 32; }
+
+static void WriteSavedSettings() {
+    if (!g_settingsMenu || !g_cfgPath[0]) return;
+    for (const Setting& st : kSettings) WritePrivateProfileStringA("QuickContinue", st.key, *st.value ? "1" : "0", g_cfgPath);
+}
+
+// "Reset to defaults": delete the cfg and take the values of the ini again.
+static void ResetSettings() {
+    if (g_cfgPath[0]) DeleteFileA(g_cfgPath);
+    for (const Setting& st : kSettings)
+        *st.value = GetPrivateProfileIntA("QuickContinue", st.key, st.def ? 1 : 0, g_iniPath) != 0;
+    Log("settings reset to the ini values");
+}
+
+static void LoadSavedSettings() {
+    if (!g_settingsMenu) return;
+    char docs[MAX_PATH];
+    if (FAILED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, docs))) return;
+    _snprintf_s(g_cfgPath, MAX_PATH, _TRUNCATE, "%s\\GTA San Andreas User Files\\QuickContinue.SA.cfg", docs);
+    for (const Setting& st : kSettings)   // the ini value stays if the cfg has none
+        *st.value = GetPrivateProfileIntA("QuickContinue", st.key, *st.value ? 1 : 0, g_cfgPath) != 0;
+    Log("settings: saved values in %s", g_cfgPath);
+}
+
+// Texts for QC_SET (entry in Options), QC_STT (page title), QC_S0.. (a setting with its value) and QC_NOTE.
+static const char* SettingsText(void* /*self*/, const char* key) {
+    const PageText& t = PageTexts();
+    static char list[64];
+    if (strcmp(key, "QC_SET") == 0) {          // entry in the Options list: capitals like its neighbours
+        if (g_textPage[0]) { strcpy_s(list, g_textPage); UpperAscii(list); }
+        else { strcpy_s(list, Gxt(t.page)); UpperGxt(list); }
+        return list;
+    }
+    if (strcmp(key, "QC_STT") == 0) return g_textPage[0] ? g_textPage : Gxt(t.page);   // page title: as written
+    if (strcmp(key, "QC_NOTE") == 0) return g_textNote[0] ? g_textNote : Gxt(t.note);
+    if (strcmp(key, "QC_RST") == 0) { g_rowPending = kSettingCount; return g_textReset[0] ? g_textReset : Gxt(t.reset); }
+    if (key[3] == 'S' && key[4] >= '0' && key[4] < '0' + kSettingCount && key[5] == 0) {
+        g_rowPending = key[4] - '0';   // the game asks for the value column right after the name
+        return g_textNames[g_rowPending][0] ? g_textNames[g_rowPending] : Gxt(t.names[g_rowPending]);
+    }
+    return nullptr;
+}
+
+// The value column of a row: the game requests "FEL_xxx" (a language name) for it. Returns the setting's ON / OFF
+// (the game's own translated texts), or nothing for the reset row.
+static const char* SettingsValueText(void* self) {
+    const int i = g_rowPending;
+    g_rowPending = -1;
+    if (i >= kSettingCount) return "";
+    const char* v = g_textGetOrig(self, *kSettings[i].value ? "FEM_ON" : "FEM_OFF");
+    return (v && v[0]) ? v : (*kSettings[i].value ? "On" : "Off");
+}
+
+constexpr int kFirstRow = 1;   // item 0 of the page is the note
+
+static bool g_settingsTried    = false;
+static bool g_settingsInserted = false;
+
+static void SetItem(MenuItem& it, uint8_t action, const char* name, uint8_t type, int8_t target) {
+    it.m_nActionType = action;
+    memset(it.m_szName, 0, sizeof(it.m_szName));
+    strcpy_s(it.m_szName, name);
+    it.m_nType = type;
+    it.m_nTargetMenu = target;
+}
+
+// Adds "QuickContinue" to Options (in front of Back) and builds the page in the borrowed console screen.
+static bool InstallSettingsMenu(MenuScreen* table) {
+    MenuScreen& opt  = table[SCREEN_OPTIONS];
+    MenuScreen& disp = table[SCREEN_DISPLAY];
+    MenuScreen& page = table[SCREEN_GAME_LOADED];
+
+    if (strcmp(opt.m_szTitleName, "FET_OPT") != 0 || strcmp(disp.m_szTitleName, "FEH_DIS") != 0 ||
+        strcmp(page.m_szTitleName, "FET_LG") != 0 || strcmp(page.m_aItems[1].m_szName, "FEM_OK") != 0 ||
+        strcmp(disp.m_aItems[0].m_szName, "FED_BRI") != 0 || strcmp(disp.m_aItems[1].m_szName, "MAP_LEG") != 0)
+        return false;
+
+    int back = -1;                                           // the "Back" entry (absolute position) closes the list
+    for (int i = 0; i < 11; i++) if (strcmp(opt.m_aItems[i].m_szName, "FEDS_TB") == 0) { back = i; break; }
+    if (back < 1 || opt.m_aItems[11].m_szName[0] != 0) return false;
+    const MenuItem backItem = opt.m_aItems[back];
+
+    // The page: the first row takes the anchor of the Display page's first row, the others stack below it.
+    memset(&page, 0, sizeof(page));
+    strcpy_s(page.m_szTitleName, "QC_STT");
+    page.m_nParentMenu = opt.m_nParentMenu;
+    page.m_nStartEntry = 1;                                   // the cursor starts on the first setting, not on the note
+    // Row 0 is a plain text line (action LABEL, type 0) like the heading lines of the game's own pages: it cannot be selected.
+    SetItem(page.m_aItems[0], ACTION_LABEL, "QC_NOTE", 0, 0);
+    for (int i = 0; i < kSettingCount; i++) {
+        MenuItem& it = page.m_aItems[kFirstRow + i];
+        it = disp.m_aItems[i == 0 ? 0 : 1];                   // option row: type and alignment; the first one keeps the anchor
+        char key[8]; _snprintf_s(key, sizeof(key), _TRUNCATE, "QC_S%d", i);
+        SetItem(it, ACTION_QC_SETTING, key, TYPE_OPTION, SCREEN_GAME_LOADED);
+        if (i) it.m_X = it.m_Y = 0;
+    }
+    MenuItem& reset = page.m_aItems[kFirstRow + kSettingCount];
+    reset = disp.m_aItems[1];
+    SetItem(reset, ACTION_QC_SETTING, "QC_RST", TYPE_OPTION, SCREEN_GAME_LOADED);
+    reset.m_X = reset.m_Y = 0;
+    page.m_aItems[kFirstRow + kSettingCount + 1] = backItem;
+
+    // Options: the new entry is copied from the one above Back (same type, stacked below it).
+    MenuItem entry = opt.m_aItems[back - 1];
+    SetItem(entry, ACTION_CHANGEMENU, "QC_SET", TYPE_BUTTON, SCREEN_GAME_LOADED);
+    entry.m_X = entry.m_Y = 0;
+    for (int i = 10; i >= back; --i) opt.m_aItems[i + 1] = opt.m_aItems[i];
+    opt.m_aItems[back] = entry;
+    return true;
+}
+
+// ProcessPCMenuOptions is the first step of the game's option handling; returning 1 means "handled".
+using PcOptionsFn = char(__thiscall*)(void* self, char input, char enter);
+static PcOptionsFn g_pcOptionsOrig = nullptr;
+
+static char __fastcall PcOptionsHook(MenuManager* self, void* /*edx*/, char input, char enter) {
+    if (g_settingsInserted && self->m_nCurrentScreen == SCREEN_GAME_LOADED && (input || enter)) {
+        const int item = self->m_nCurrentScreenItem;
+        const int sel  = item - kFirstRow;   // 0..kSettingCount-1 = a setting, kSettingCount = reset
+        if (sel >= 0 && sel <= kSettingCount && g_table[SCREEN_GAME_LOADED].m_aItems[item].m_nActionType == ACTION_QC_SETTING) {
+            if (sel == kSettingCount) {
+                if (enter) ResetSettings();   // the reset row is a button: Enter only
+            } else {
+                *kSettings[sel].value = !*kSettings[sel].value;
+                WriteSavedSettings();
+                LOG_DEBUG("setting %s = %d", kSettings[sel].key, *kSettings[sel].value);
+            }
+            return 1;
+        }
+    }
+    return g_pcOptionsOrig(self, input, enter);
+}
+
+static void SetupSettingsMenu() {
+    g_settingsTried = true;
+    if (!EnsureTextHook()) { Log("settings page: text hook failed"); return; }
+    const uintptr_t target = CheckCallSite(ADDR_PcOptionsCall, 0);
+    if (!target) { Log("settings page: option handler call not found"); return; }
+    if (!InstallSettingsMenu(EnsureTable())) { Log("settings page: screen tables are not as expected, page skipped"); return; }
+    g_pcOptionsOrig = reinterpret_cast<PcOptionsFn>(target);
+    PatchRel(ADDR_PcOptionsCall, static_cast<int32_t>(reinterpret_cast<uintptr_t>(&PcOptionsHook) - (ADDR_PcOptionsCall + 5)));
+    g_settingsInserted = true;
+    Log("settings page installed (Options > QuickContinue)");
+}
+
 // ---------------------------------------------------------------------------
 // Per-frame hook (menu draw)
 // ---------------------------------------------------------------------------
@@ -236,11 +611,10 @@ static void FirstMenuFrame() {
     if (g_slot < 0) return; // no save game: leave the menu alone
 
     if (g_continueButton) {
-        const int textCalls = HookMenuTextCalls();
-        g_table = ResolveScreenTable();
-        const bool inserted = InsertContinueEntry(g_table[SCREEN_MAIN_MENU]);
-        Log("CText::Get call sites hooked: %d, menu entry inserted: %d", textCalls, inserted);
-        g_menuPatched = textCalls > 0 && inserted;
+        const bool hooked = EnsureTextHook();
+        const bool inserted = InsertContinueEntry(EnsureTable()[SCREEN_MAIN_MENU]);
+        Log("text hook installed: %d, main menu entry inserted: %d", hooked, inserted);
+        g_menuPatched = hooked && inserted;
     }
     if (g_autoLoad && !(g_skipKey && (GetAsyncKeyState(g_skipKey) & 0x8000))) StartLoad(g_slot);
 }
@@ -274,9 +648,13 @@ static void MenuTick() {
     if (g_debug && g_initDone) TraceState(m);
     static int frames = 0;
     if (g_debug && g_menuPatched && m.m_nCurrentScreen == SCREEN_MAIN_MENU && ++frames == 60) DumpMainMenu("after 60 frames");
+    if (g_settingsMenu && !g_settingsTried) SetupSettingsMenu();
     static bool logged = false;
     if (!logged) { logged = true; LOG_DEBUG("menu hook running, m_bMainMenuSwitch = %d, screen = %d", m.m_bMainMenuSwitch, m.m_nCurrentScreen); }
-    if (!m.m_bMainMenuSwitch) return;            // pause menu / in-game
+    if (!m.m_bMainMenuSwitch) {                  // pause menu / in-game
+        if (g_pauseLoadLatest) PauseMenuTick(m);
+        return;
+    }
     if (!g_initDone) FirstMenuFrame();
     if (!g_menuPatched) return;
 
