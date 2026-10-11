@@ -1,0 +1,21 @@
+# build output
+out/
+build/
+dist/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.asi
+*.zip
+
+# logs and dumps
+*.log
+*.log.old
+*.dmp
+
+# editors, tools
+.vs/
+.vscode/
+__pycache__/
+*.pyc
