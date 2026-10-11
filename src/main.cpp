@@ -25,7 +25,7 @@
 
 using namespace game;
 
-constexpr const char* kVersion = "1.0.0";
+constexpr const char* kVersion = "1.1.0";
 
 // ---------------------------------------------------------------------------
 // Log (QuickContinue.SA.log in "Documents\GTA San Andreas User Files")
@@ -778,20 +778,32 @@ static void __cdecl SkippedTitleFadeOut() {
 constexpr uintptr_t ADDR_LS_bFadeOutToBlack     = 0xBAB31F;
 constexpr uintptr_t ADDR_LS_timeSinceLastScreen = 0xBAB340; // float
 
+constexpr uintptr_t ADDR_LS_chunksLoaded   = 0x8D0940; // int32, starts at -1, +1 per loaded chunk (CLoadingScreen::NewChunkLoaded)
+constexpr uintptr_t ADDR_LS_barStartChunk  = 0x8D0944; // int32, -1 = the bar has not started yet
+constexpr uintptr_t ADDR_GetTimeInCycles   = 0x619410; // the game's millisecond clock (cdecl, no arguments)
+constexpr uintptr_t ADDR_TimeToSeconds     = 0x858CDC; // float 0.001
+
 // The first loading splash normally fades in from black over ~70 frames (20 black + 50 fading), which
-// the copyright image used to hide. Starting the loading screen directly on splash 1, fully visible, with
-// the "time since last splash" far in the past-negative so it does not switch splashes early, skips that.
+// the copyright image used to hide. Starting the loading screen directly on splash 1, fully visible, skips that.
+// The game then carries on as usual: the "time since last splash" is set to now (as CLoadingScreen::Init does), so the
+// images change every 5 seconds from there, and NewChunkLoaded draws the loading bar. The bar is only drawn once its start
+// chunk is set, which the game does at the first change of image; that has not happened yet, so it is set here.
 static void PrimeLoadingScreen() {
     static bool done = false;
     if (done || !g_smoothLoad) return;
     done = true;
+    const int ms = reinterpret_cast<int(__cdecl*)()>(ADDR_GetTimeInCycles)();
+    const float now = static_cast<float>(ms < 0 ? ms + 4294967296.0 : ms) * *reinterpret_cast<float*>(ADDR_TimeToSeconds);
     *reinterpret_cast<int32_t*>(ADDR_LS_currDisplayedSplash)  = 1;      // SPLASH_1_NO_BAR
     *reinterpret_cast<bool*>(ADDR_LS_bFading)                 = false;
     *reinterpret_cast<bool*>(ADDR_LS_bFadeInNextFromBlack)    = false;
     *reinterpret_cast<bool*>(ADDR_LS_bFadeOutToBlack)         = false;
     *reinterpret_cast<uint8_t*>(ADDR_LS_FadeAlpha)            = 255;
-    *reinterpret_cast<float*>(ADDR_LS_timeSinceLastScreen)    = 1.0e9f; // delta = now - 1e9 < 0: keep splash 1
-    Log("loading screen primed (splash 1, no fade-in)");
+    *reinterpret_cast<float*>(ADDR_LS_timeSinceLastScreen)    = now;
+    int32_t& chunks = *reinterpret_cast<int32_t*>(ADDR_LS_chunksLoaded);
+    int32_t& barStart = *reinterpret_cast<int32_t*>(ADDR_LS_barStartChunk);
+    if (barStart == -1) barStart = chunks < 0 ? 0 : chunks;
+    Log("loading screen primed (splash 1, no fade-in, bar start chunk %d)", barStart);
 }
 
 static void SkipTitleFade() {
